@@ -268,6 +268,8 @@
         <button class="edtab" id="tabFut">Planned</button>
       </div>
 
+      <div class="hint" style="margin:-2px 0 10px">✦ Type a <b>place</b> (and country to disambiguate) and the country code, latitude &amp; longitude fill in automatically. Hit <b>⌖</b> to re-locate, or edit any field by hand.</div>
+
       <div class="colhead">
         <span></span><span>Place</span><span>Country</span><span>CC</span>
         <span class="hidesm">Lat</span><span class="hidesm">Lon</span><span>Arrive</span><span>Depart</span><span></span>
@@ -1347,8 +1349,12 @@ function edRows(){
   list.querySelectorAll('.erow').forEach(row=>{
     const i=+row.dataset.i, s=EDIT.stops[i];
     const bind=(sel,key,num)=>{const el=row.querySelector(sel); if(el) el.onchange=()=>{ s[key]= num? parseFloat(el.value) : el.value; };};
-    bind('.f-name','name'); bind('.f-country','country');
-    row.querySelector('.f-cc').onchange=e=>{s.cc=e.target.value.toUpperCase().slice(0,2);};
+    // Name / country auto-locate: fill CC, lat, lon from the place (country disambiguates).
+    const nameEl=row.querySelector('.f-name');
+    nameEl.onchange=async()=>{ s.name=nameEl.value; await geocodeRow(i,row); };
+    const cnEl=row.querySelector('.f-country');
+    cnEl.onchange=async()=>{ s.country=cnEl.value; await geocodeRow(i,row); };
+    row.querySelector('.f-cc').onchange=e=>{s.cc=e.target.value.toUpperCase().slice(0,2); s._ccManual=true;};
     bind('.f-lat','lat',true); bind('.f-lon','lon',true);
     bind('.f-arrive','arrive'); bind('.f-depart','depart');
     const note=row.querySelector('.f-note'); note.onchange=()=>{const v=note.value.trim(); if(v)s.note=v; else delete s.note;};
@@ -1361,22 +1367,50 @@ async function rowAction(act,i){
   if(act==='up' && i>0){ [EDIT.stops[i-1],EDIT.stops[i]]=[EDIT.stops[i],EDIT.stops[i-1]]; edRows(); return; }
   if(act==='down' && i<EDIT.stops.length-1){ [EDIT.stops[i+1],EDIT.stops[i]]=[EDIT.stops[i],EDIT.stops[i+1]]; edRows(); return; }
   if(act==='geo'){
-    const s=EDIT.stops[i]; const q=s.name; if(!q) return;
-    edMsg('Looking up '+q+'…','busy');
-    try{
-      const r=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=1&language=en&format=json`);
-      const j=await r.json(); const hit=j.results&&j.results[0];
-      if(hit){ s.lat=+hit.latitude.toFixed(4); s.lon=+hit.longitude.toFixed(4); if(hit.country_code)s.cc=hit.country_code.toUpperCase(); if(!s.country&&hit.country)s.country=hit.country; edRows(); edMsg('Filled coordinates for '+q,'ok'); }
-      else edMsg('No match for "'+q+'"','err');
-    }catch(e){ edMsg('Lookup failed','err'); }
+    const row=$('rowlist').querySelector('.erow[data-i="'+i+'"]');
+    await geocodeRow(i,row,{force:true});
+    return;
   }
+}
+// Geocode a stop from its name, using the country field to pick the best match.
+// Auto-called on name/country edits; ⌖ button forces it (and overrides symbol-name skip).
+async function geocodeRow(i,row,opts={}){
+  const s=EDIT.stops[i];
+  const name=(s.name||'').trim();
+  if(!name || name.toLowerCase()==='new stop') return;
+  // Names with arrows/multi-hop or trek/flat labels rarely geocode cleanly — skip auto, allow force.
+  if(/[→>/]/.test(name) && !opts.force) return;
+  edMsg('Locating '+name+'…','busy');
+  try{
+    const r=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=10&language=en&format=json`);
+    const j=await r.json();
+    const results=j.results||[];
+    if(!results.length){ edMsg('No match for “'+name+'” — set lat/lon by hand.','err'); return; }
+    const want=(s.country||'').trim().toLowerCase();
+    let hit=results[0];
+    if(want){
+      const m=results.find(x=>(x.country||'').toLowerCase()===want || (x.country_code||'').toLowerCase()===want.slice(0,2));
+      if(m) hit=m;
+    }
+    s.lat=+hit.latitude.toFixed(4);
+    s.lon=+hit.longitude.toFixed(4);
+    if(hit.country_code && (!s._ccManual || opts.force)){ s.cc=hit.country_code.toUpperCase(); s._ccManual=false; }
+    if(!s.country && hit.country) s.country=hit.country;
+    if(row){
+      const set=(sel,v)=>{const el=row.querySelector(sel); if(el) el.value=v;};
+      set('.f-lat',s.lat); set('.f-lon',s.lon); set('.f-cc',s.cc);
+      const cEl=row.querySelector('.f-country'); if(cEl && !cEl.value) cEl.value=s.country;
+    }
+    const where=[hit.name, hit.admin1, hit.country].filter(Boolean).join(', ');
+    edMsg('✓ '+where+'  ·  '+s.lat+', '+s.lon,'ok');
+  }catch(e){ edMsg('Location lookup failed — check your connection.','err'); }
 }
 function newStop(){
   const last=EDIT.stops[EDIT.stops.length-1];
   const base=last?parse(last.depart):TODAY;
   const a=new Date(base.getTime()); const d=new Date(base.getTime()+3*DAY);
   const iso=x=>x.toISOString().slice(0,10);
-  EDIT.stops.push({name:"New stop",country:"",cc:"",lat:0,lon:0,arrive:iso(a),depart:iso(d),tentative:true});
+  EDIT.stops.push({name:"",country:"",cc:"",lat:0,lon:0,arrive:iso(a),depart:iso(d),tentative:true});
   edFilter='all'; syncTabs(); edRows();
   $('rowlist').lastElementChild?.scrollIntoView({behavior:'smooth',block:'center'});
 }
